@@ -20,7 +20,16 @@ const demoRequests = [
 ];
 const demoResources = { source: 'Demo Data', resources: { water: { availability: 55, status: 'Moderate', change: -4, unit: '%' }, electricity: { availability: 82, status: 'Stable', change: 2, unit: '%' }, solar: { generation: 4.2, status: 'Available', change: 12, unit: 'kWh' }, demand: { level: 'Normal', status: 'Balanced', change: 1, unit: '%' } }, history: [{ day: 'Mon', water: 68, energy: 72 }, { day: 'Tue', water: 64, energy: 78 }, { day: 'Wed', water: 61, energy: 74 }, { day: 'Thu', water: 60, energy: 81 }, { day: 'Fri', water: 58, energy: 76 }, { day: 'Sat', water: 55, energy: 82 }, { day: 'Sun', water: 55, energy: 82 }] };
 
-if (hasMongo) mongoose.connect(process.env.MONGODB_URI).then(() => console.log('MongoDB connected')).catch(err => console.error('MongoDB connection failed:', err.message));
+if (hasMongo) mongoose.connect(process.env.MONGODB_URI).then(async () => {
+  console.log('MongoDB connected');
+  try {
+    const count = await EmergencyRequest.countDocuments();
+    if (count === 0) {
+      await EmergencyRequest.insertMany(demoRequests.map(({ _id, ...r }) => r));
+      console.log('Seeded sample emergency requests into MongoDB');
+    }
+  } catch (err) { console.error('Seeding error:', err.message); }
+}).catch(err => console.error('MongoDB connection failed:', err.message));
 const demoMode = () => !mongoose.connection.readyState;
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const auth = (req, res, next) => {
@@ -91,12 +100,32 @@ app.get('/api/emergency', asyncRoute(async (req, res) => {
   const { category, priority, status } = req.query;
   if (demoMode()) { const list = demoRequests.filter(r => (!category || r.category === category) && (!priority || r.priority === priority) && (!status || r.status === status)); return res.json({ requests: list, source: 'Demo Data' }); }
   const filters = {}; if (category) filters.category = category; if (priority) filters.priority = priority; if (status) filters.status = status;
-  res.json({ requests: await EmergencyRequest.find(filters).sort({ createdAt: -1 }).limit(200), source: 'Community reports' });
+  let requests = await EmergencyRequest.find(filters).sort({ createdAt: -1 }).limit(200);
+  if (!requests.length && !category && !priority && !status) {
+    try {
+      await EmergencyRequest.insertMany(demoRequests.map(({ _id, ...r }) => r));
+      requests = await EmergencyRequest.find(filters).sort({ createdAt: -1 }).limit(200);
+    } catch {}
+  }
+  res.json({ requests, source: 'Community reports' });
 }));
 app.post('/api/emergency/create', asyncRoute(async (req, res) => {
-  const { title, description, category, priority = 'Medium', location, contact = '', coordinates } = req.body || {};
+  const { title, description, category, priority = 'Medium', location, contact = '' } = req.body || {};
+  let { coordinates } = req.body || {};
   if (!validateText(title, 120) || !validateText(description, 2000) || !validateText(location, 200) || !['Food', 'Drinking water', 'Medicine', 'Shelter', 'Clothing', 'Rescue assistance', 'Other'].includes(category) || !['Low', 'Medium', 'High', 'Critical'].includes(priority)) return res.status(400).json({ error: 'Please complete all required fields with valid values.' });
-  if (demoMode()) { const request = { _id: `local-${Date.now()}`, title: title.trim(), description: description.trim(), category, priority, status: 'Open', location: location.trim(), coordinates: coordinates && Number.isFinite(+coordinates.lat) && Number.isFinite(+coordinates.lng) ? { lat: +coordinates.lat, lng: +coordinates.lng } : undefined, createdAt: new Date().toISOString() }; demoRequests.unshift(request); return res.status(201).json({ request, source: 'Demo Data', message: 'Request added to this demo session.' }); }
+  if (!coordinates || !Number.isFinite(+coordinates.lat) || !Number.isFinite(+coordinates.lng)) {
+    if (process.env.OPENWEATHER_API_KEY) {
+      try {
+        const geoRes = await fetch(`https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(location)}&limit=1&appid=${process.env.OPENWEATHER_API_KEY}`);
+        const places = await geoRes.json();
+        if (places && places[0]) coordinates = { lat: places[0].lat, lng: places[0].lon };
+      } catch (err) { console.error('Geocoding emergency location failed:', err.message); }
+    }
+    if (!coordinates || !coordinates.lat) {
+      coordinates = { lat: 9.9816 + (Math.random() - 0.5) * 0.08, lng: 76.2999 + (Math.random() - 0.5) * 0.08 };
+    }
+  }
+  if (demoMode()) { const request = { _id: `local-${Date.now()}`, title: title.trim(), description: description.trim(), category, priority, status: 'Open', location: location.trim(), coordinates, createdAt: new Date().toISOString() }; demoRequests.unshift(request); return res.status(201).json({ request, source: 'Demo Data', message: 'Request added to this demo session.' }); }
   const request = await EmergencyRequest.create({ title, description, category, priority, location, contact, coordinates });
   res.status(201).json({ request, source: 'Community reports' });
 }));
