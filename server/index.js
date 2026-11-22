@@ -137,7 +137,7 @@ const rateBuckets = new Map();
 function rateLimit(req, res, next) { const key = req.ip; const now = Date.now(); const bucket = rateBuckets.get(key) || { start: now, count: 0 }; if (now - bucket.start > 60000) { bucket.start = now; bucket.count = 0; } bucket.count++; rateBuckets.set(key, bucket); if (bucket.count > 60) return res.status(429).json({ error: 'Please wait a moment before trying again.' }); next(); }
 async function askGemini(prompt) {
   if (!process.env.GEMINI_API_KEY) return null;
-  const models = ['gemini-3.5-flash', 'gemini-flash-lite-latest', 'gemini-3.8-flash'];
+  const models = ['gemini-flash-lite-latest', 'gemini-3.5-flash', 'gemini-3.8-flash'];
   for (const model of models) {
     try {
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
@@ -146,7 +146,7 @@ async function askGemini(prompt) {
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: 'You are ResQ Assistant. Give concise, practical climate and safety advice. Never invent weather, shelter, supply, or rescue information. State clearly when data is unavailable. Use the language requested by the user. Prefer short bullet points.' }] },
           contents: [{ parts: [{ text: String(prompt).slice(0, 4000) }] }],
-          generationConfig: { temperature: 0.4, maxOutputTokens: 500 }
+          generationConfig: { temperature: 0.4, maxOutputTokens: 1000 }
         })
       });
       if (response.ok) {
