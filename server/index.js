@@ -8,6 +8,7 @@ import mongoose from 'mongoose';
 import { EmergencyRequest, User } from './models.js';
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || true }));
 app.use(express.json({ limit: '32kb' }));
 const port = Number(process.env.PORT || 4000);
@@ -133,10 +134,31 @@ app.get('/api/emergency/:id', asyncRoute(async (req, res) => { if (demoMode()) {
 app.patch('/api/emergency/:id/status', auth, asyncRoute(async (req, res) => { if (req.user.role !== 'admin' && req.user.role !== 'responder') return res.status(403).json({ error: 'Only authorized responders can update request status.' }); const { status } = req.body || {}; if (!['Open', 'In Progress', 'Resolved'].includes(status)) return res.status(400).json({ error: 'Invalid status.' }); const request = await EmergencyRequest.findByIdAndUpdate(req.params.id, { status }, { new: true, runValidators: true }); return request ? res.json({ request }) : res.status(404).json({ error: 'Request not found.' }); }));
 
 const rateBuckets = new Map();
-function rateLimit(req, res, next) { const key = req.ip; const now = Date.now(); const bucket = rateBuckets.get(key) || { start: now, count: 0 }; if (now - bucket.start > 60000) { bucket.start = now; bucket.count = 0; } bucket.count++; rateBuckets.set(key, bucket); if (bucket.count > 20) return res.status(429).json({ error: 'Please wait a moment before trying again.' }); next(); }
+function rateLimit(req, res, next) { const key = req.ip; const now = Date.now(); const bucket = rateBuckets.get(key) || { start: now, count: 0 }; if (now - bucket.start > 60000) { bucket.start = now; bucket.count = 0; } bucket.count++; rateBuckets.set(key, bucket); if (bucket.count > 60) return res.status(429).json({ error: 'Please wait a moment before trying again.' }); next(); }
 async function askGemini(prompt) {
   if (!process.env.GEMINI_API_KEY) return null;
-  try { const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ systemInstruction: { parts: [{ text: 'You are ResQ Assistant. Give concise, practical climate and safety advice. Never invent weather, shelter, supply, or rescue information. State clearly when data is unavailable. Use the language requested by the user. Prefer short bullet points.' }] }, contents: [{ parts: [{ text: String(prompt).slice(0, 4000) }] }], generationConfig: { temperature: 0.4, maxOutputTokens: 500 } }) }); if (!response.ok) throw new Error('AI provider unavailable'); const data = await response.json(); return data.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || null; } catch (error) { console.error('Gemini request failed:', error.message); return null; }
+  const models = ['gemini-3.5-flash', 'gemini-flash-lite-latest', 'gemini-3.8-flash'];
+  for (const model of models) {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: 'You are ResQ Assistant. Give concise, practical climate and safety advice. Never invent weather, shelter, supply, or rescue information. State clearly when data is unavailable. Use the language requested by the user. Prefer short bullet points.' }] },
+          contents: [{ parts: [{ text: String(prompt).slice(0, 4000) }] }],
+          generationConfig: { temperature: 0.4, maxOutputTokens: 500 }
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.map(p => p.text).join('');
+        if (text) return text;
+      }
+    } catch (error) {
+      console.error(`Gemini request failed on ${model}:`, error.message);
+    }
+  }
+  return null;
 }
 function answerDemo(message, context = {}, language = 'en') { const q = message.toLowerCase(); if (language === 'ml') { if (/flood|വെള്ളപ്പൊക്കം/.test(q)) return 'വെള്ളപ്പൊക്ക സമയത്ത്: ഉയർന്ന സ്ഥലത്തേക്ക് മാറുക, വെള്ളം കയറിയ റോഡിലൂടെ നടക്കുകയോ വാഹനമോടിക്കുകയോ ചെയ്യരുത്, സുരക്ഷിതമാണെങ്കിൽ മാത്രം വൈദ്യുതി ഓഫ് ചെയ്യുക. പ്രാദേശിക അധികൃതരുടെ നിർദേശങ്ങൾ പാലിക്കുക. അടിയന്തര അപകടമുണ്ടെങ്കിൽ പ്രാദേശിക അടിയന്തര സേവനങ്ങളെ ബന്ധപ്പെടുക.'; if (/crop|farm|paddy|plant|കൃഷി|വിള/.test(q)) return 'വിളയെക്കുറിച്ചുള്ള കൃത്യമായ നിർദേശത്തിന് വിളയുടെ പേരും സ്ഥലവും പങ്കിടുക. കനത്ത മഴയ്ക്ക് മുമ്പ് ചാലുകൾ വൃത്തിയാക്കുക, തൈകളെ വെള്ളക്കെട്ടിൽ നിന്ന് സംരക്ഷിക്കുക, മഴയ്ക്ക് തൊട്ടുമുമ്പ് വളം ഇടുന്നത് ഒഴിവാക്കുക.'; if (/heat|hot|ചൂട്|വെയിൽ/.test(q)) return 'ചൂടുകാലത്ത് ഇടയ്ക്കിടെ വെള്ളം കുടിക്കുക, ഉച്ചസമയത്തെ കഠിനമായ പുറംപ്രവർത്തനം ഒഴിവാക്കുക, ലഘുവായ വസ്ത്രം ധരിക്കുക. കുട്ടികൾ, വയോധികർ, അയൽക്കാർ എന്നിവരുടെ ക്ഷേമം അന്വേഷിക്കുക.'; if (/water|drought|വെള്ളം|വരൾച്ച/.test(q)) return 'ജലക്ഷാമത്തിൽ കുടിവെള്ളത്തിനും ആവശ്യങ്ങൾക്കും മുൻഗണന നൽകുക, ചോർച്ചകൾ പരിഹരിക്കുക, സുരക്ഷിതമായ ഉപയോഗിച്ച വെള്ളം വീണ്ടും ഉപയോഗിക്കുക, പ്രാദേശിക ജല അതോറിറ്റിയുടെ നിർദേശങ്ങൾ പാലിക്കുക.'; if (/shelter|supply|help|emergency|അഭയം|സഹായം|അടിയന്തര/.test(q)) return 'സമൂഹം പങ്കുവെച്ച സഹായ അഭ്യർത്ഥനകൾ കാണിക്കാം. സ്ഥിരീകരിച്ച അഭയകേന്ദ്രങ്ങളുടെയോ സാധനങ്ങളുടെയോ വിവരങ്ങൾ എനിക്ക് ലഭ്യമല്ല. ഉറപ്പായ വിവരങ്ങൾക്ക് പ്രാദേശിക അധികൃതരെയോ അടിയന്തര സേവനങ്ങളെയോ ബന്ധപ്പെടുക.'; return `ഡെമോ മോഡിൽ തത്സമയ കാലാവസ്ഥാ പ്രവചനം ലഭ്യമല്ല.${context.location ? ` ${context.location} പ്രദേശത്തിനായി` : ''} നിലവിലെ വിവരങ്ങൾക്കും ഔദ്യോഗിക മുന്നറിയിപ്പുകൾക്കും പ്രാദേശിക കാലാവസ്ഥാ സേവനം പരിശോധിക്കുക. സുരക്ഷാ നിർദേശങ്ങൾക്കും കൃഷി, ജലസംരക്ഷണ സഹായത്തിനും ഞാൻ സഹായിക്കാം.`; } if (/rain|weather|tomorrow/.test(q)) return `I don’t have a live forecast in demo mode. ${context.location ? `For ${context.location}, ` : ''}check your local weather service for current conditions and official alerts. If heavy rain is forecast, avoid flooded roads and low-lying areas.`; if (/flood/.test(q)) return 'During flooding: move to higher ground, avoid walking or driving through floodwater, switch off electricity only if safe, and follow local emergency authority instructions. Call local emergency services if in immediate danger.'; if (/heat|hot/.test(q)) return 'During a heatwave: drink water regularly, avoid strenuous outdoor activity during the hottest hours, wear light clothing, and check on children, older adults, and neighbours.'; if (/crop|farm|paddy|plant/.test(q)) return 'For crop-specific guidance, share your crop and location. Before heavy rain, clear drainage, protect seedlings from waterlogging, and avoid applying fertilizer just before a downpour.'; if (/water|drought/.test(q)) return 'During water shortages, prioritize drinking and hygiene, fix leaks, reuse safe greywater for plants, and follow local water authority guidance.'; if (/shelter|supply|help|emergency/.test(q)) return 'I can show community-submitted requests, but I don’t have verified shelter or supply availability. Check with local authorities or emergency services for confirmed resources.'; return 'I can help with climate safety, farming, water conservation, and emergency preparedness. Tell me your location and what you need help with. I’ll clearly identify when live information is unavailable.'; }
 app.post('/api/ai/chat', rateLimit, asyncRoute(async (req, res) => { const { message, language = 'en', context = {} } = req.body || {}; if (!validateText(message, 2000)) return res.status(400).json({ error: 'Enter a question to get started.' }); const contextText = context.weather ? `Weather data (${context.weather.source || 'provided'}): ${JSON.stringify(context.weather).slice(0, 1000)}.` : 'No live weather data is available unless supplied below.'; const reply = await askGemini(`Reply in ${language === 'ml' ? 'Malayalam' : 'English'}. User question: ${message}\nLocation: ${context.location || 'not supplied'}\nApplication context: ${contextText}\nOnly use the supplied weather. Do not claim to know shelters, supplies, or official warnings without verified data.`); res.json({ reply: reply || answerDemo(message, context, language), source: reply ? 'Gemini' : 'Demo guidance' }); }));
